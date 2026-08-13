@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Print-to-PDF pagination.
+ * Each `.maf-page` is one logical document page (data page / legal+signature page).
+ * `break-after: page` forces a page boundary between them - the browser's print
+ * engine (Save as PDF) handles the actual pagination, no PDF library involved. */
+.maf-page {
+    break-after: page;
+    page-break-after: always;
+}
+
+.maf-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
+}
+
+@page {
+    size: letter;
+    margin: 0.5in;
+}
+
+@media print {
+    .no-print {
+        display: none !important;
+    }
+
+    /* The printed document must always be a plain white/black page, regardless of
+     * the user's OS/Airtable dark theme - print stylesheets shouldn't respect
+     * prefers-color-scheme. */
+    html,
+    body,
+    .maf-document,
+    .maf-page {
+        background: white !important;
+        color: black !important;
+    }
+}
