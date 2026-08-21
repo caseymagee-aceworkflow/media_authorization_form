@@ -1,14 +1,31 @@
 import {useEffect, useMemo, useRef, useState} from 'react';
 import {useBase, useCustomProperties, useRecords, useSearchParams} from '@airtable/blocks/interface/ui';
-import {MEDIA_PLAN_FIELDS, MEDIA_PLAN_TABLE_ID, FALLBACK_FISCAL_LABEL, LEGAL_TEMPLATE} from './lib/constants';
+import {
+    MEDIA_PLAN_FIELDS,
+    MEDIA_PLAN_TABLE_ID,
+    MONTHLY_PLAN_FIELDS,
+    MONTHLY_PLAN_TABLE_ID,
+    FALLBACK_FISCAL_LABEL,
+    LEGAL_TEMPLATE,
+} from './lib/constants';
 import {computeFlightDates} from './lib/flightDates';
 import {formatCurrency} from './lib/formatters';
+import {
+    getFiscalYearForDate,
+    getQuarterForDate,
+    getPeriodRange,
+    formatPeriodLabel,
+    rangesOverlap,
+    monthNameToNumber,
+} from './lib/fiscalPeriods';
 import RecordPicker from './components/RecordPicker';
 import DataPage from './components/DataPage';
 import LegalPage from './components/LegalPage';
 import PrintButton from './components/PrintButton';
 import SaveToRecordButton from './components/SaveToRecordButton';
 import ColumnPicker from './components/ColumnPicker';
+import PeriodPicker from './components/PeriodPicker';
+import MafRecordPicker from './components/MafRecordPicker';
 import BackToCampaignButton from './components/BackToCampaignButton';
 
 // This custom element is scoped not just to a single table, but to a specific subset of
@@ -61,20 +78,27 @@ function getCustomProperties(base) {
 const NUMERIC_FIELD_TYPES = new Set(['currency', 'number', 'percent', 'duration', 'rating', 'count']);
 
 // Extracts only the fields DataPage/LegalPage need from a Media Plan record, rather than
-// passing the raw Record instance around. columnValues holds the configurable table
-// columns; the rest (flight dates, stats) are fixed regardless of column configuration.
-// Currency columns are formatted with formatCurrency (2 decimals + commas, same as the
-// stat boxes) rather than left at whatever decimal precision the field happens to be
-// configured with in Airtable - otherwise two currency columns can show inconsistent
-// decimal places side by side in the same row.
-function toLineItem(record, columns, hasField) {
+// passing the raw Record instance around. `stats` (currentAdjustedBudget/totalCommission)
+// is resolved by the caller beforehand - either the record's own full-flight rollups, or
+// prorated sums over just the months inside the selected period - so this function doesn't
+// need to know which. Currency columns are formatted with formatCurrency (2 decimals +
+// commas, same as the stat boxes); the two dollar-figure columns specifically substitute
+// `stats` instead of re-reading the record's raw (always full-flight) rollup fields, so the
+// table and the stat boxes never disagree when a period is active.
+function toLineItem(record, columns, hasField, stats) {
     return {
         id: record.id,
         flightStart: safeGetValue(record, MEDIA_PLAN_FIELDS.flightStart, hasField),
         flightEnd: safeGetValue(record, MEDIA_PLAN_FIELDS.flightEnd, hasField),
-        currentAdjustedBudget: safeGetValue(record, MEDIA_PLAN_FIELDS.currentAdjustedBudget, hasField),
-        totalCommission: safeGetValue(record, MEDIA_PLAN_FIELDS.totalCommission, hasField),
+        currentAdjustedBudget: stats.currentAdjustedBudget,
+        totalCommission: stats.totalCommission,
         columnValues: columns.map(field => {
+            if (field.id === MEDIA_PLAN_FIELDS.currentAdjustedBudget) {
+                return stats.currentAdjustedBudget == null ? '' : formatCurrency(stats.currentAdjustedBudget);
+            }
+            if (field.id === MEDIA_PLAN_FIELDS.totalCommission) {
+                return stats.totalCommission == null ? '' : formatCurrency(stats.totalCommission);
+            }
             if (field.type !== 'currency') return safeGetString(record, field.id, hasField);
             const value = safeGetValue(record, field.id, hasField);
             return value === null ? '' : formatCurrency(value);
@@ -117,19 +141,28 @@ function TableMismatchDiagnostic({base}) {
     );
 }
 
-// This custom element is currently restricted to a single connected table (Media Plan),
-// so "which campaign" is derived from Media Plan's own link back to Campaign rather than
-// reading Campaign directly. Once multi-table support is available (needs an admin to
-// enable AI Labs), this can go back to reading Campaign's own records/fields directly -
-// see lib/constants.js's CAMPAIGN_FIELDS, left in place for that migration.
+// This custom element is currently restricted to at most two connected tables (Media Plan,
+// and now Monthly Plan for period prorating), so "which campaign" is derived from Media
+// Plan's own link back to Campaign rather than reading Campaign directly. Once multi-table
+// access covers Campaign too, this can go back to reading Campaign's own records/fields
+// directly - see lib/constants.js's CAMPAIGN_FIELDS, left in place for that migration.
 //
 // Only mounted once mediaPlanTable is confirmed to exist, so hooks below are always
 // called in the same order - the existence check lives in App, one level up.
-function CampaignDocumentApp({mediaPlanTable}) {
+function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
     const mediaPlanRecords = useRecords(mediaPlanTable);
+    const monthlyPlanRecords = useRecords(monthlyPlanTable ?? null);
     const hasField = useMemo(
         () => fieldId => Boolean(mediaPlanTable.getFieldByIdIfExists(fieldId)),
         [mediaPlanTable],
+    );
+    // Monthly Plan is an optional second connection (needs an admin to enable multi-table
+    // support for this element, then add it in Designer) - guarded everywhere it's read so
+    // the rest of the app keeps working, just without period-prorated dollar figures, until
+    // that's done.
+    const hasMonthlyPlanField = useMemo(
+        () => fieldId => Boolean(monthlyPlanTable && monthlyPlanTable.getFieldByIdIfExists(fieldId)),
+        [monthlyPlanTable],
     );
 
     // The properties panel (Designer/build-time only) sets the starting column selection;
@@ -199,33 +232,140 @@ function CampaignDocumentApp({mediaPlanTable}) {
         [campaigns, selectedCampaignId],
     );
 
-    const documentData = useMemo(() => {
-        if (!selectedCampaign) return null;
-
-        const campaignLineItemRecords = mediaPlanRecords.filter(record =>
+    // Every Media Plan row for the selected campaign, regardless of period - the base set
+    // that period selection (below) filters down from, and where fiscal-quarter basis /
+    // existing-MAF-record data is read from (any one row is enough, since every row for a
+    // campaign shares the same client and the same campaign-level MAF history).
+    const campaignRecordsUnfiltered = useMemo(() => {
+        if (!selectedCampaign) return [];
+        return mediaPlanRecords.filter(record =>
             (safeGetValue(record, MEDIA_PLAN_FIELDS.campaign, hasField) || []).some(
                 link => link.id === selectedCampaign.id,
             ),
         );
-        if (campaignLineItemRecords.length === 0) return null;
+    }, [selectedCampaign, mediaPlanRecords, hasField]);
 
-        const lineItems = campaignLineItemRecords.map(r => toLineItem(r, columns, hasField));
+    const fiscalStartMonth = useMemo(() => {
+        if (campaignRecordsUnfiltered.length === 0) return 1;
+        const values = safeGetValue(campaignRecordsUnfiltered[0], MEDIA_PLAN_FIELDS.fiscalYearStartDate, hasField) || [];
+        return monthNameToNumber(values[0]) ?? 1;
+    }, [campaignRecordsUnfiltered, hasField]);
+
+    // Period selection and the "update an existing MAF" choice are per-campaign, transient
+    // action state - not deep-linked via useSearchParams (unlike campaignId above), and
+    // reset whenever the campaign changes so a leftover period from a different campaign
+    // never silently carries over.
+    const [period, setPeriod] = useState(null);
+    const [selectedMafRecordId, setSelectedMafRecordId] = useState(null);
+    useEffect(() => {
+        setPeriod(null);
+        setSelectedMafRecordId(null);
+    }, [selectedCampaignId]);
+
+    const periodRange = useMemo(
+        () => (period ? getPeriodRange(period, fiscalStartMonth) : null),
+        [period, fiscalStartMonth],
+    );
+
+    // Existing MAF records for this campaign, read via the lookup-through-Campaign fields
+    // (Campaign MAF Records / Period Starts / Period Ends are index-aligned, per
+    // lib/constants.js) - powers MafRecordPicker's "update existing" option.
+    const mafRecordOptions = useMemo(() => {
+        if (campaignRecordsUnfiltered.length === 0) return [];
+        const first = campaignRecordsUnfiltered[0];
+        const links = safeGetValue(first, MEDIA_PLAN_FIELDS.mafRecords, hasField) || [];
+        const starts = safeGetValue(first, MEDIA_PLAN_FIELDS.mafPeriodStarts, hasField) || [];
+        const ends = safeGetValue(first, MEDIA_PLAN_FIELDS.mafPeriodEnds, hasField) || [];
+        return links.map((link, i) => ({
+            id: link.id,
+            name: link.name,
+            periodStart: starts[i] || null,
+            periodEnd: ends[i] || null,
+        }));
+    }, [campaignRecordsUnfiltered, hasField]);
+
+    // Selecting an existing MAF pre-fills the period picker from its stored dates (still
+    // editable afterward) rather than forcing a fresh pick every time.
+    function selectMafRecord(mafId) {
+        setSelectedMafRecordId(mafId);
+        const match = mafId && mafRecordOptions.find(r => r.id === mafId);
+        if (match?.periodStart && match?.periodEnd) {
+            setPeriod({
+                startYear: getFiscalYearForDate(match.periodStart, fiscalStartMonth),
+                startQuarter: getQuarterForDate(match.periodStart, fiscalStartMonth),
+                endYear: getFiscalYearForDate(match.periodEnd, fiscalStartMonth),
+                endQuarter: getQuarterForDate(match.periodEnd, fiscalStartMonth),
+            });
+        }
+    }
+
+    // A line item is INCLUDED if its flight overlaps the period at all; its dollar figures
+    // are then separately prorated (below) to just the months inside the period - these are
+    // two different filters over two different granularities, both intentional.
+    const includedRecords = useMemo(() => {
+        if (!periodRange) return campaignRecordsUnfiltered;
+        return campaignRecordsUnfiltered.filter(record => {
+            const flightStart = safeGetValue(record, MEDIA_PLAN_FIELDS.flightStart, hasField);
+            const flightEnd = safeGetValue(record, MEDIA_PLAN_FIELDS.flightEnd, hasField);
+            return rangesOverlap(flightStart, flightEnd, periodRange.start, periodRange.end);
+        });
+    }, [campaignRecordsUnfiltered, periodRange, hasField]);
+
+    // Whether dollar figures for the current view are genuinely prorated (Monthly Plan
+    // connected) or just today's full-flight totals for whichever lines are included (not
+    // yet connected) - surfaced to the viewer via documentData.periodCaveat rather than
+    // silently showing numbers that look period-specific but aren't.
+    const canProrate = Boolean(monthlyPlanTable) && hasMonthlyPlanField(MONTHLY_PLAN_FIELDS.mediaPlan);
+
+    const getLineStats = useMemo(() => {
+        const periodStartMonth = periodRange?.start.slice(0, 7);
+        const periodEndMonth = periodRange?.end.slice(0, 7);
+        return record => {
+            if (!periodRange || !canProrate) {
+                return {
+                    currentAdjustedBudget: safeGetValue(record, MEDIA_PLAN_FIELDS.currentAdjustedBudget, hasField),
+                    totalCommission: safeGetValue(record, MEDIA_PLAN_FIELDS.totalCommission, hasField),
+                };
+            }
+            const monthsInPeriod = monthlyPlanRecords.filter(row => {
+                const links = safeGetValue(row, MONTHLY_PLAN_FIELDS.mediaPlan, hasMonthlyPlanField) || [];
+                if (!links.some(link => link.id === record.id)) return false;
+                const recordOrder = safeGetString(row, MONTHLY_PLAN_FIELDS.recordOrder, hasMonthlyPlanField);
+                return recordOrder >= periodStartMonth && recordOrder <= periodEndMonth;
+            });
+            const sum = fieldId =>
+                monthsInPeriod.reduce((total, row) => total + (safeGetValue(row, fieldId, hasMonthlyPlanField) || 0), 0);
+            return {
+                currentAdjustedBudget: sum(MONTHLY_PLAN_FIELDS.adjustedBudget),
+                totalCommission: sum(MONTHLY_PLAN_FIELDS.commission),
+            };
+        };
+    }, [periodRange, canProrate, monthlyPlanRecords, hasField, hasMonthlyPlanField]);
+
+    const documentData = useMemo(() => {
+        if (!selectedCampaign || campaignRecordsUnfiltered.length === 0) return null;
+
+        const lineItems = includedRecords.map(r => toLineItem(r, columns, hasField, getLineStats(r)));
         const flightDates = computeFlightDates(lineItems);
         // Client is a lookup through the Campaign link (verified via get_table_schema), so
         // it's readable from any line item without needing direct Campaign table access -
         // all rows for a campaign resolve to the same client, so the first is enough.
         const clientLegalName =
-            safeGetString(campaignLineItemRecords[0], MEDIA_PLAN_FIELDS.client, hasField) ||
+            safeGetString(campaignRecordsUnfiltered[0], MEDIA_PLAN_FIELDS.client, hasField) ||
             LEGAL_TEMPLATE.clientLegalName;
 
         return {
             title: selectedCampaign.name,
             clientLegalName,
-            // Fiscal Year only lives on Campaign, which isn't reachable from this
-            // single-table build - hardcoded until multi-table access is restored.
-            fiscalLabel: FALLBACK_FISCAL_LABEL,
+            fiscalLabel: period ? formatPeriodLabel(period) : FALLBACK_FISCAL_LABEL,
             todaysDate: todayIsoDate(),
             flightDates,
+            periodStart: periodRange?.start ?? null,
+            periodEnd: periodRange?.end ?? null,
+            periodCaveat:
+                period && !canProrate
+                    ? 'Monthly Plan isn’t connected to this element yet - dollar figures below are full-flight totals for the included lines, not prorated to this period.'
+                    : null,
             stats: {
                 currentAdjustedBudget: sumStat(
                     lineItems,
@@ -242,7 +382,17 @@ function CampaignDocumentApp({mediaPlanTable}) {
             })),
             lineItems,
         };
-    }, [selectedCampaign, mediaPlanRecords, columns, hasField]);
+    }, [
+        selectedCampaign,
+        campaignRecordsUnfiltered,
+        includedRecords,
+        columns,
+        hasField,
+        getLineStats,
+        period,
+        periodRange,
+        canProrate,
+    ]);
 
     if (!selectedCampaign || !documentData) {
         return (
@@ -254,25 +404,48 @@ function CampaignDocumentApp({mediaPlanTable}) {
         );
     }
 
+    const campaignFlightDates = computeFlightDates(
+        campaignRecordsUnfiltered.map(r => ({
+            flightStart: safeGetValue(r, MEDIA_PLAN_FIELDS.flightStart, hasField),
+            flightEnd: safeGetValue(r, MEDIA_PLAN_FIELDS.flightEnd, hasField),
+        })),
+    );
+
     return (
         <div className="min-h-screen bg-gray-gray50 dark:bg-gray-gray800">
-            <div className="no-print p-4 flex items-center justify-between gap-4 border-b border-gray-gray200 bg-white dark:bg-gray-gray700">
+            <div className="no-print p-4 flex items-center justify-between gap-4 border-b border-gray-gray200 bg-white dark:bg-gray-gray700 flex-wrap">
                 <RecordPicker
                     records={campaigns}
                     selectedId={selectedCampaignId}
                     onSelect={setSelectedCampaignId}
                     compact
                 />
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                     <ColumnPicker
                         availableFields={availableFields}
                         selectedFieldIds={effectiveColumnFieldIds}
                         onChange={setColumnFieldIds}
                         maxColumns={COLUMN_COUNT}
                     />
+                    <PeriodPicker
+                        flightStart={campaignFlightDates.start}
+                        flightEnd={campaignFlightDates.end}
+                        fiscalStartMonth={fiscalStartMonth}
+                        period={period}
+                        onChange={setPeriod}
+                    />
+                    <MafRecordPicker
+                        records={mafRecordOptions}
+                        selectedId={selectedMafRecordId}
+                        onSelect={selectMafRecord}
+                    />
                     <SaveToRecordButton
                         campaignRecordId={selectedCampaign.id}
                         columnFieldIds={columns.map(field => field.id)}
+                        periodLabel={period ? formatPeriodLabel(period) : null}
+                        periodStart={periodRange?.start ?? null}
+                        periodEnd={periodRange?.end ?? null}
+                        existingMafRecordId={selectedMafRecordId}
                     />
                     <PrintButton />
                     <BackToCampaignButton />
@@ -289,10 +462,14 @@ function CampaignDocumentApp({mediaPlanTable}) {
 export default function App() {
     const base = useBase();
     const mediaPlanTable = base.getTableByIdIfExists(MEDIA_PLAN_TABLE_ID);
+    // Optional - only present once an admin connects it as a second data source for this
+    // element (see lib/constants.js's MONTHLY_PLAN_TABLE_ID comment). CampaignDocumentApp
+    // degrades gracefully (full-flight totals instead of prorated ones) when this is null.
+    const monthlyPlanTable = base.getTableByIdIfExists(MONTHLY_PLAN_TABLE_ID);
 
     if (!mediaPlanTable) {
         return <TableMismatchDiagnostic base={base} />;
     }
 
-    return <CampaignDocumentApp mediaPlanTable={mediaPlanTable} />;
+    return <CampaignDocumentApp mediaPlanTable={mediaPlanTable} monthlyPlanTable={monthlyPlanTable} />;
 }

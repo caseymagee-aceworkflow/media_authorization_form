@@ -1,4 +1,4 @@
-// Airtable Automation "Run a script" action.
+// Airtable Automation "Run a script" action ("PDF Generator", wfl6lCrUcjhkZ7CLg).
 //
 // This is NOT part of the Interface Extension build/bundle - Automations have their own
 // separate scripting environment (the classic Airtable Scripting API: base.getTable(),
@@ -11,44 +11,64 @@
 //    So the trigger is a webhook instead: create an Automation with a webhook trigger,
 //    action = "Run a script". The Interface extension's SaveToRecordButton.jsx POSTs to
 //    the generated webhook URL (see lib/constants.js's GENERATE_ATTACHMENT_WEBHOOK_URL).
-// 2. Map the webhook trigger's incoming `recordId` AND `columnFieldIds` fields (sent as
-//    application/x-www-form-urlencoded - hooks.airtable.com rejects other Content-Types,
-//    confirmed via curl) into script input variables. columnFieldIds is a comma-joined
-//    list of Media Plan field IDs, in display order - it mirrors whatever's currently
-//    configured in the Interface Extension's own properties panel (App.jsx's
-//    useCustomProperties columns), sent fresh at click time since this script has no way
-//    to read that element's configuration directly.
-// 3. In the script step:
-//    - Add regular input variables `recordId` (type: record ID) and `columnFieldIds`
-//      (type: text), both mapped from the webhook payload above.
-//    - Add a Personal Access Token scoped to data.records:write on this base only (create
-//      one at https://airtable.com/create/tokens) as a **Secret** (not a plain input
-//      variable) named `airtablePat`, via the script action's "Add existing secret" /
-//      secrets panel - read with input.secret('airtablePat') below, not input.config().
+// 2. Map the webhook trigger's incoming fields (sent as application/x-www-form-urlencoded -
+//    hooks.airtable.com rejects other Content-Types, confirmed via curl) into script input
+//    variables, all type "Single line text": `recordId` (the Campaign record ID),
+//    `columnFieldIds` (comma-joined Media Plan field IDs, mirrors the Interface Extension's
+//    own configurable columns), `periodLabel` (e.g. "Q3 2026"), `periodStart` / `periodEnd`
+//    (ISO dates, "YYYY-MM-DD"), and `existingMafRecordId` (empty string means "create a new
+//    MAF record"; otherwise the MAF record to update in place).
+// 3. Add a Personal Access Token scoped to data.records:write on this base only (create one
+//    at https://airtable.com/create/tokens) as a **Secret** (not a plain input variable)
+//    named `airtablePat`, via the script action's "Add existing secret" / secrets panel -
+//    read with input.secret('airtablePat') below, not input.config().
 // 4. Paste this entire file into the script body.
 
-// "Campaign" replaces the old "Campaign Info" table; "Media Plan" (singular, a rebuilt
-// table with a different schema) replaces the old "Media Plans". Quarter-specific tracking
-// was dropped in favor of aggregate rollup amounts - see project decisions.
 const CAMPAIGN_TABLE_ID = 'tblApzXRiH8nTBPtU';
 const MEDIA_PLAN_TABLE_ID = 'tblHy85L1pZBxioOT';
-const ATTACHMENT_FIELD_ID = 'fldwC0hqXqeObHLwL'; // "MAF Drafts" - not "MAF Attachment", see below
+const MONTHLY_PLAN_TABLE_ID = 'tblAExLLgHy1XAkE3';
+const MAF_TABLE_ID = 'tblIgrgjUrNwKbYgH';
 
 const CAMPAIGN_FIELDS = {
     campaignName: 'fldwfSiX6f8B7MXGr',
-    fiscalYear: 'fldTiznICd5dHZDsU', // single-linked-record field (to a Fiscal Year table)
     mediaPlans: 'fldDh02dbQtnUKtwc',
     todaysDate: 'fldW4bq4AEkxjAi8J',
-    currentAdjustedBudget: 'fld0Q6Smwdi1Vtj95',
-    totalCommission: 'fldWaZqYIqXzeHSes',
     client: 'fldyGTEvcfdtAwLWy', // link to the Client table
 };
 
-// flightStart/flightEnd are fixed (used for the Flight Dates line, not a table column) -
-// the line-items table's own columns are dynamic, see DEFAULT_COLUMN_FIELD_IDS below.
+// flightStart/flightEnd are fixed (used for the Flight Dates line and period-overlap
+// filtering, not table columns) - the line-items table's own columns are dynamic, see
+// DEFAULT_COLUMN_FIELD_IDS below. currentAdjustedBudget/totalCommission are read only to
+// detect when a configured column IS one of those two fields, so its displayed value can
+// be swapped for the prorated figure - see buildColumnValue().
 const MEDIA_PLAN_FIELDS = {
     flightStart: 'fldB2cmo3XmVX2nM5',
     flightEnd: 'fldWaLcSFgHKXGE0a',
+    currentAdjustedBudget: 'fldmvjNGReswjPhKZ',
+    totalCommission: 'fldGYhiz2WJTLD6lM',
+};
+
+// Monthly Plan ("Monthly Budget Lines" in the base UI) - one row per calendar month within
+// a Media Plan's flight. adjustedBudget/commission are already-computed per-month formula
+// fields that Media Plan's own full-flight rollups (currentAdjustedBudget/totalCommission
+// above) sum across ALL of a plan's months (verified via get_table_schema) - prorating to a
+// period means summing just these two fields for the months inside it, not reimplementing
+// the budget/commission business logic here.
+const MONTHLY_PLAN_FIELDS = {
+    mediaPlan: 'fldQ9Hf1mL3WH7tFf',
+    recordOrder: 'flddFUxLmoSCywuzl', // formula, "YYYY-MM", zero-padded and string-sortable
+    adjustedBudget: 'fldmtBBITSyiUdK7R',
+    commission: 'fldMlfsA8n1M9IqX8',
+};
+
+const MAF_FIELDS = {
+    periodLabel: 'fldPt3dfaELRJ1SPM', // primary field
+    campaign: 'fldaH1k0eqFY4r4Oy',
+    periodStart: 'fldzuRVbofvoij98f',
+    periodEnd: 'fldt1yWwXunX2JtCy',
+    pdf: 'fldhAfFf0q0iEzYPV',
+    status: 'fldk40JwEcwdZ6RL9',
+    lastGeneratedAt: 'fldUHHCwdk4dT3Cfe',
 };
 
 // Matches the Interface Extension's own default column set (lib/constants.js) - used only
@@ -250,25 +270,56 @@ function buildPdfBytes(pageContents, imageXObject) {
 // hooks.airtable.com rejects other Content-Types, confirmed via curl), and Airtable's
 // webhook-payload mapping doesn't necessarily hand the mapped field to the script as a
 // plain string - normalize whatever shape it actually arrives in.
-function normalizeRecordId(value) {
+function unwrapValue(value) {
     if (typeof value === 'string') return value;
-    if (Array.isArray(value)) return normalizeRecordId(value[0]);
+    if (Array.isArray(value)) return unwrapValue(value[0]);
     if (value && typeof value === 'object') {
         if (typeof value.value === 'string') return value.value;
         if (typeof value.id === 'string') return value.id;
     }
-    throw new Error(`Could not extract a record ID string from input: ${JSON.stringify(value)}`);
+    return null;
 }
 
-// Same webhook-payload-shape uncertainty as recordId above, plus its own fallback: an
-// empty/missing value (nothing sent, or a request that predates this input variable
-// existing) falls back to DEFAULT_COLUMN_FIELD_IDS rather than producing a blank table.
+function normalizeRequiredText(value, label) {
+    const unwrapped = unwrapValue(value);
+    if (!unwrapped) throw new Error(`Missing required input: ${label}`);
+    return unwrapped;
+}
+
+// Used for existingMafRecordId (empty = create new) and defensively for period fields -
+// SaveToRecordButton always sends real values when it fires, but a request that predates
+// one of these inputs being wired up, or that comes from somewhere else, shouldn't crash.
+function normalizeOptionalText(value) {
+    return unwrapValue(value) || '';
+}
+
+// Same shape-safety as above, plus its own fallback: an empty/missing value falls back to
+// DEFAULT_COLUMN_FIELD_IDS rather than producing a blank table.
 function normalizeColumnFieldIds(value) {
-    let raw = value;
-    if (Array.isArray(raw)) raw = raw[0];
-    if (raw && typeof raw === 'object') raw = raw.value ?? raw.id;
+    const raw = unwrapValue(value);
     const ids = typeof raw === 'string' ? raw.split(',').map(id => id.trim()).filter(Boolean) : [];
     return ids.length > 0 ? ids : DEFAULT_COLUMN_FIELD_IDS;
+}
+
+function money(value) {
+    if (value == null) return 'N/A';
+    const [whole, cents] = value.toFixed(2).split('.');
+    const negative = whole.startsWith('-');
+    const digits = negative ? whole.slice(1) : whole;
+    let withCommas = '';
+    for (let i = 0; i < digits.length; i++) {
+        if (i > 0 && (digits.length - i) % 3 === 0) withCommas += ',';
+        withCommas += digits[i];
+    }
+    return `${negative ? '-' : ''}$${withCommas}.${cents}`;
+}
+
+// Rough Helvetica average character-width estimate (as a fraction of font size), used to
+// approximate centering the stat box values/labels below - text() is left-anchored only,
+// with no real font-metrics table to measure exact string width, so this is deliberately
+// approximate rather than pixel-precise.
+function estimateTextWidth(text, fontSize, bold) {
+    return text.length * fontSize * (bold ? 0.58 : 0.5);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,8 +328,17 @@ function normalizeColumnFieldIds(value) {
 const inputConfig = input.config();
 const campaignTable = base.getTable(CAMPAIGN_TABLE_ID);
 const mediaPlanTable = base.getTable(MEDIA_PLAN_TABLE_ID);
+const monthlyPlanTable = base.getTable(MONTHLY_PLAN_TABLE_ID);
+const mafTable = base.getTable(MAF_TABLE_ID);
 
-const campaignRecordId = normalizeRecordId(inputConfig.recordId);
+const campaignRecordId = normalizeRequiredText(inputConfig.recordId, 'recordId');
+const periodLabel = normalizeRequiredText(inputConfig.periodLabel, 'periodLabel');
+const periodStart = normalizeRequiredText(inputConfig.periodStart, 'periodStart');
+const periodEnd = normalizeRequiredText(inputConfig.periodEnd, 'periodEnd');
+const existingMafRecordId = normalizeOptionalText(inputConfig.existingMafRecordId);
+const periodStartMonth = periodStart.slice(0, 7); // "YYYY-MM", for Record Order comparisons
+const periodEndMonth = periodEnd.slice(0, 7);
+
 // selectRecordAsync/selectRecordsAsync load every field on the table by default - Campaign
 // and Media Plan both have dozens of rollup/lookup fields referencing OTHER linked tables,
 // and resolving all of those cross-table dependencies is what actually burns through the
@@ -310,23 +370,63 @@ const columns = columnFieldIds
 
 const linkedIdSet = new Set((campaignRecord.getCellValue(CAMPAIGN_FIELDS.mediaPlans) || []).map(link => link.id));
 const mediaPlanQuery = await mediaPlanTable.selectRecordsAsync({
-    fields: [...new Set([...Object.values(MEDIA_PLAN_FIELDS), ...columns.map(f => f.id)])],
+    fields: [
+        ...new Set([
+            MEDIA_PLAN_FIELDS.flightStart,
+            MEDIA_PLAN_FIELDS.flightEnd,
+            ...columns.map(f => f.id),
+        ]),
+    ],
 });
-const lineItemRecords = mediaPlanQuery.records.filter(r => linkedIdSet.has(r.id));
+// A line item is INCLUDED if its flight overlaps the period at all; its dollar figures are
+// then separately prorated (below) to just the months inside the period - mirrors App.jsx's
+// two-filter approach exactly, so the live preview and this generated PDF never disagree.
+const lineItemRecords = mediaPlanQuery.records.filter(record => {
+    if (!linkedIdSet.has(record.id)) return false;
+    const flightStart = record.getCellValue(MEDIA_PLAN_FIELDS.flightStart);
+    const flightEnd = record.getCellValue(MEDIA_PLAN_FIELDS.flightEnd);
+    if (!flightStart || !flightEnd) return false;
+    return flightStart <= periodEnd && periodStart <= flightEnd;
+});
+
+const monthlyPlanQuery = await monthlyPlanTable.selectRecordsAsync({fields: Object.values(MONTHLY_PLAN_FIELDS)});
+
+// Prorated {currentAdjustedBudget, totalCommission} for one Media Plan record - sums the
+// already-computed per-month formula fields (see MONTHLY_PLAN_FIELDS comment) for just the
+// months that fall inside [periodStartMonth, periodEndMonth].
+function proratedStatsFor(mediaPlanRecordId) {
+    const monthsInPeriod = monthlyPlanQuery.records.filter(row => {
+        const links = row.getCellValue(MONTHLY_PLAN_FIELDS.mediaPlan) || [];
+        if (!links.some(link => link.id === mediaPlanRecordId)) return false;
+        const recordOrder = row.getCellValueAsString(MONTHLY_PLAN_FIELDS.recordOrder);
+        return recordOrder >= periodStartMonth && recordOrder <= periodEndMonth;
+    });
+    const sum = fieldId => monthsInPeriod.reduce((total, row) => total + (row.getCellValue(fieldId) || 0), 0);
+    return {
+        currentAdjustedBudget: sum(MONTHLY_PLAN_FIELDS.adjustedBudget),
+        totalCommission: sum(MONTHLY_PLAN_FIELDS.commission),
+    };
+}
 
 // Currency columns are run through money() (2 decimals + commas, matching the stat boxes)
 // instead of getCellValueAsString, which mirrors each field's own configured decimal
-// precision in Airtable - left alone, two currency columns can show inconsistent decimal
-// places side by side in the same row (see money() above).
-const lineItems = lineItemRecords.map(record => ({
-    flightStart: record.getCellValue(MEDIA_PLAN_FIELDS.flightStart),
-    flightEnd: record.getCellValue(MEDIA_PLAN_FIELDS.flightEnd),
-    columnValues: columns.map(field => {
-        if (field.type !== 'currency') return record.getCellValueAsString(field.id);
-        const value = record.getCellValue(field.id);
-        return value == null ? '' : money(value);
-    }),
-}));
+// precision in Airtable. The two dollar-figure columns specifically substitute the prorated
+// stats instead of the record's raw (always full-flight) rollup fields, same as App.jsx.
+const lineItems = lineItemRecords.map(record => {
+    const stats = proratedStatsFor(record.id);
+    return {
+        flightStart: record.getCellValue(MEDIA_PLAN_FIELDS.flightStart),
+        flightEnd: record.getCellValue(MEDIA_PLAN_FIELDS.flightEnd),
+        stats,
+        columnValues: columns.map(field => {
+            if (field.id === MEDIA_PLAN_FIELDS.currentAdjustedBudget) return money(stats.currentAdjustedBudget);
+            if (field.id === MEDIA_PLAN_FIELDS.totalCommission) return money(stats.totalCommission);
+            if (field.type !== 'currency') return record.getCellValueAsString(field.id);
+            const value = record.getCellValue(field.id);
+            return value == null ? '' : money(value);
+        }),
+    };
+});
 
 const flightStarts = lineItems.map(i => i.flightStart).filter(Boolean).sort();
 const flightEnds = lineItems.map(i => i.flightEnd).filter(Boolean).sort();
@@ -335,37 +435,14 @@ const flightRange =
         ? `${flightStarts[0]} - ${flightEnds[flightEnds.length - 1]}`
         : 'N/A';
 
-function money(value) {
-    if (value == null) return 'N/A';
-    const [whole, cents] = value.toFixed(2).split('.');
-    const negative = whole.startsWith('-');
-    const digits = negative ? whole.slice(1) : whole;
-    let withCommas = '';
-    for (let i = 0; i < digits.length; i++) {
-        if (i > 0 && (digits.length - i) % 3 === 0) withCommas += ',';
-        withCommas += digits[i];
-    }
-    return `${negative ? '-' : ''}$${withCommas}.${cents}`;
-}
-
 const title = campaignRecord.getCellValueAsString(CAMPAIGN_FIELDS.campaignName);
-const fiscalLabel = campaignRecord.getCellValueAsString(CAMPAIGN_FIELDS.fiscalYear) || 'FY27';
 const todaysDate = campaignRecord.getCellValueAsString(CAMPAIGN_FIELDS.todaysDate);
 const clientLegalName =
     campaignRecord.getCellValueAsString(CAMPAIGN_FIELDS.client) || LEGAL_TEMPLATE.clientLegalName;
-// Read directly off Campaign's own rollups (this script has full base access, unlike the
-// Interface extension) rather than re-summing the line items - same underlying numbers,
-// one less place for the two to drift apart.
-const currentAdjustedBudget = campaignRecord.getCellValue(CAMPAIGN_FIELDS.currentAdjustedBudget);
-const totalCommission = campaignRecord.getCellValue(CAMPAIGN_FIELDS.totalCommission);
-
-// Rough Helvetica average character-width estimate (as a fraction of font size), used to
-// approximate centering the stat box values/labels below - text() is left-anchored only,
-// with no real font-metrics table to measure exact string width, so this is deliberately
-// approximate rather than pixel-precise.
-function estimateTextWidth(text, fontSize, bold) {
-    return text.length * fontSize * (bold ? 0.58 : 0.5);
-}
+// Sum of the already-prorated per-line stats, NOT Campaign's own full-flight rollups -
+// these are the period-scoped totals, matching the stat boxes in the live preview exactly.
+const currentAdjustedBudget = lineItems.reduce((sum, item) => sum + item.stats.currentAdjustedBudget, 0);
+const totalCommission = lineItems.reduce((sum, item) => sum + item.stats.totalCommission, 0);
 
 // --- Page 1: data ---
 const page1 = createPageBuilder();
@@ -375,7 +452,7 @@ page1.image(448, 716, 92, 28); // top-right, matching DataPage.jsx's logo placem
 y -= 16;
 page1.text(72, y, 10, 'Digital Media Buy Authorization');
 y -= 16;
-page1.boldText(72, y, 11, `${title} ${fiscalLabel}`);
+page1.boldText(72, y, 11, `${title} ${periodLabel}`);
 y -= 30;
 
 // Bordered summary box, mirroring DataPage.jsx's layout: date/flight info on the left,
@@ -388,7 +465,7 @@ page1.line(72, SUMMARY_BOX_TOP, 72, SUMMARY_BOX_BOTTOM, 1);
 page1.line(540, SUMMARY_BOX_TOP, 540, SUMMARY_BOX_BOTTOM, 1);
 
 page1.text(84, SUMMARY_BOX_TOP - 16, 9, `Today's Date: ${todaysDate}`);
-page1.text(84, SUMMARY_BOX_TOP - 30, 9, `Flight Dates: ${flightRange}`);
+page1.text(84, SUMMARY_BOX_TOP - 30, 9, `Flight Dates: ${flightRange} (Period: ${periodStart} - ${periodEnd})`);
 
 const statBoxes = [
     {label: 'Current Adjusted Budget', value: money(currentAdjustedBudget)},
@@ -449,6 +526,10 @@ lineItems.forEach(item => {
     });
     y -= rowLineCount * ROW_LINE_HEIGHT;
 });
+
+if (lineItems.length === 0) {
+    page1.text(72, y, 9, 'No line items overlap this period.');
+}
 
 // --- Page 2: legal + signatures ---
 const page2 = createPageBuilder();
@@ -513,14 +594,38 @@ const pdfBytes = buildPdfBytes([page1.build(), page2.build()], {
 });
 const base64Pdf = toBase64(pdfBytes);
 
-// MAF Drafts is a multi-attachment field - uploadAttachment always adds a new attachment
-// rather than replacing, so the previous copy is cleared first via Airtable's own
-// scripting write (no PAT needed for this part, unlike the upload call below).
-await campaignTable.updateRecordAsync(campaignRecord, {[ATTACHMENT_FIELD_ID]: []});
+// Create a new MAF record, or update the existing one's period fields in place - either
+// way, regenerating resets Status to "Generated" since a fresh PDF invalidates any prior
+// sign-off on the previous version.
+const now = new Date().toISOString();
+let mafRecordId = existingMafRecordId;
+if (mafRecordId) {
+    await mafTable.updateRecordAsync(mafRecordId, {
+        [MAF_FIELDS.periodLabel]: periodLabel,
+        [MAF_FIELDS.periodStart]: periodStart,
+        [MAF_FIELDS.periodEnd]: periodEnd,
+        [MAF_FIELDS.status]: {name: 'Generated'}, // singleSelect fields need {name: ...}, not a bare string, in the classic Scripting API
+        [MAF_FIELDS.lastGeneratedAt]: now,
+    });
+} else {
+    mafRecordId = await mafTable.createRecordAsync({
+        [MAF_FIELDS.periodLabel]: periodLabel,
+        [MAF_FIELDS.campaign]: [{id: campaignRecordId}],
+        [MAF_FIELDS.periodStart]: periodStart,
+        [MAF_FIELDS.periodEnd]: periodEnd,
+        [MAF_FIELDS.status]: {name: 'Generated'}, // singleSelect fields need {name: ...}, not a bare string, in the classic Scripting API
+        [MAF_FIELDS.lastGeneratedAt]: now,
+    });
+}
 
+// PDF is a multi-attachment field - uploadAttachment always ADDS a new attachment rather
+// than replacing, so every run keeps prior copies as version history. Each upload gets a
+// timestamped filename so versions stay distinguishable in the attachment list (title +
+// periodLabel alone would collide on every regeneration of the same record).
 // content.airtable.com, NOT api.airtable.com - this endpoint lives on a different
 // subdomain than every other Airtable REST call.
-const uploadUrl = `https://content.airtable.com/v0/${base.id}/${campaignRecord.id}/${ATTACHMENT_FIELD_ID}/uploadAttachment`;
+const versionStamp = now.replace(/[:.]/g, '-');
+const uploadUrl = `https://content.airtable.com/v0/${base.id}/${mafRecordId}/${MAF_FIELDS.pdf}/uploadAttachment`;
 const response = await fetch(uploadUrl, {
     method: 'POST',
     headers: {
@@ -529,7 +634,7 @@ const response = await fetch(uploadUrl, {
     },
     body: JSON.stringify({
         contentType: 'application/pdf',
-        filename: `MAF-${title}-${fiscalLabel}.pdf`,
+        filename: `MAF-${title}-${periodLabel}-${versionStamp}.pdf`,
         file: base64Pdf,
     }),
 });
@@ -538,4 +643,5 @@ const responseBody = await response.text();
 if (!response.ok) {
     throw new Error(`Attachment upload failed (${response.status}): ${responseBody}`);
 }
+output.set('mafRecordId', mafRecordId);
 output.set('uploadResult', responseBody);

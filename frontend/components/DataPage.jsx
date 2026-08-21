@@ -26,6 +26,10 @@ export default function DataPage({data}) {
                     <div className="mt-1">
                         Flight Dates: {formatDateRange(data.flightDates.start, data.flightDates.end)}
                     </div>
+                    {data.periodStart && data.periodEnd && (
+                        <div className="mt-1">Period: {formatDateRange(data.periodStart, data.periodEnd)}</div>
+                    )}
+                    {data.periodCaveat && <div className="mt-1 text-orange-orange">{data.periodCaveat}</div>}
                 </div>
                 <div className="flex gap-6">
                     <StatBox label="Current Adjusted Budget" value={data.stats.currentAdjustedBudget} />
