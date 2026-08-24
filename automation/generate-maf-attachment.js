@@ -69,6 +69,7 @@ const MAF_FIELDS = {
     pdf: 'fldhAfFf0q0iEzYPV',
     status: 'fldk40JwEcwdZ6RL9',
     lastGeneratedAt: 'fldUHHCwdk4dT3Cfe',
+    monthsApplied: 'fldnwWgG7HJMXZJ2j', // link to every Monthly Budget Line this MAF actually covers
 };
 
 // Matches the Interface Extension's own default column set (lib/constants.js) - used only
@@ -391,9 +392,11 @@ const lineItemRecords = mediaPlanQuery.records.filter(record => {
 
 const monthlyPlanQuery = await monthlyPlanTable.selectRecordsAsync({fields: Object.values(MONTHLY_PLAN_FIELDS)});
 
-// Prorated {currentAdjustedBudget, totalCommission} for one Media Plan record - sums the
-// already-computed per-month formula fields (see MONTHLY_PLAN_FIELDS comment) for just the
-// months that fall inside [periodStartMonth, periodEndMonth].
+// Prorated {currentAdjustedBudget, totalCommission, monthRecordIds} for one Media Plan
+// record - sums the already-computed per-month formula fields (see MONTHLY_PLAN_FIELDS
+// comment) for just the months that fall inside [periodStartMonth, periodEndMonth].
+// monthRecordIds is returned too so the caller can link the MAF record to exactly the
+// Monthly Plan rows that fed into it, without re-deriving this same filter a second time.
 function proratedStatsFor(mediaPlanRecordId) {
     const monthsInPeriod = monthlyPlanQuery.records.filter(row => {
         const links = row.getCellValue(MONTHLY_PLAN_FIELDS.mediaPlan) || [];
@@ -405,6 +408,7 @@ function proratedStatsFor(mediaPlanRecordId) {
     return {
         currentAdjustedBudget: sum(MONTHLY_PLAN_FIELDS.adjustedBudget),
         totalCommission: sum(MONTHLY_PLAN_FIELDS.commission),
+        monthRecordIds: monthsInPeriod.map(row => row.id),
     };
 }
 
@@ -427,6 +431,11 @@ const lineItems = lineItemRecords.map(record => {
         }),
     };
 });
+
+// Every Monthly Plan record that fed into any included line's prorated stats - a Set since
+// in practice each Monthly Plan row belongs to exactly one Media Plan, but that's not worth
+// relying on to avoid a double-linked record.
+const monthsAppliedIds = new Set(lineItems.flatMap(item => item.stats.monthRecordIds));
 
 const flightStarts = lineItems.map(i => i.flightStart).filter(Boolean).sort();
 const flightEnds = lineItems.map(i => i.flightEnd).filter(Boolean).sort();
@@ -595,9 +604,12 @@ const pdfBytes = buildPdfBytes([page1.build(), page2.build()], {
 const base64Pdf = toBase64(pdfBytes);
 
 // Create a new MAF record, or update the existing one's period fields in place - either
-// way, regenerating resets Status to "Generated" since a fresh PDF invalidates any prior
-// sign-off on the previous version.
+// way, regenerating resets Status to "Generated" (a fresh PDF invalidates any prior sign-off
+// on the previous version) and refreshes Months Applied to the current period's months -
+// an update can cover a different period than before, so the old links would otherwise go
+// stale and misreport which months this MAF actually covers.
 const now = new Date().toISOString();
+const monthsAppliedLinks = [...monthsAppliedIds].map(id => ({id}));
 let mafRecordId = existingMafRecordId;
 if (mafRecordId) {
     await mafTable.updateRecordAsync(mafRecordId, {
@@ -606,6 +618,7 @@ if (mafRecordId) {
         [MAF_FIELDS.periodEnd]: periodEnd,
         [MAF_FIELDS.status]: {name: 'Generated'}, // singleSelect fields need {name: ...}, not a bare string, in the classic Scripting API
         [MAF_FIELDS.lastGeneratedAt]: now,
+        [MAF_FIELDS.monthsApplied]: monthsAppliedLinks,
     });
 } else {
     mafRecordId = await mafTable.createRecordAsync({
@@ -614,6 +627,7 @@ if (mafRecordId) {
         [MAF_FIELDS.periodStart]: periodStart,
         [MAF_FIELDS.periodEnd]: periodEnd,
         [MAF_FIELDS.status]: {name: 'Generated'}, // singleSelect fields need {name: ...}, not a bare string, in the classic Scripting API
+        [MAF_FIELDS.monthsApplied]: monthsAppliedLinks,
         [MAF_FIELDS.lastGeneratedAt]: now,
     });
 }
