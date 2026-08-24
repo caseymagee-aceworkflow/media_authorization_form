@@ -336,7 +336,12 @@ const campaignRecordId = normalizeRequiredText(inputConfig.recordId, 'recordId')
 const periodLabel = normalizeRequiredText(inputConfig.periodLabel, 'periodLabel');
 const periodStart = normalizeRequiredText(inputConfig.periodStart, 'periodStart');
 const periodEnd = normalizeRequiredText(inputConfig.periodEnd, 'periodEnd');
-const existingMafRecordId = normalizeOptionalText(inputConfig.existingMafRecordId);
+// Read defensively under either casing - this automation's input variable was set up as
+// "ExistingMafRecordId" (capital E) in the Airtable UI, not "existingMafRecordId", which
+// silently made this always resolve to '' (always "create new") since JS property access is
+// case-sensitive. Rename the input variable to match the trigger's `existingMafRecordId`
+// field exactly for clarity, but this read works correctly either way now.
+const existingMafRecordId = normalizeOptionalText(inputConfig.existingMafRecordId ?? inputConfig.ExistingMafRecordId);
 const periodStartMonth = periodStart.slice(0, 7); // "YYYY-MM", for Record Order comparisons
 const periodEndMonth = periodEnd.slice(0, 7);
 
