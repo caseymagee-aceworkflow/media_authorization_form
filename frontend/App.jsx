@@ -21,7 +21,6 @@ import {
 import RecordPicker from './components/RecordPicker';
 import DataPage from './components/DataPage';
 import LegalPage from './components/LegalPage';
-import PrintButton from './components/PrintButton';
 import SaveToRecordButton from './components/SaveToRecordButton';
 import ColumnPicker from './components/ColumnPicker';
 import PeriodPicker from './components/PeriodPicker';
@@ -40,6 +39,16 @@ function safeGetValue(record, fieldId, hasField) {
 
 function safeGetString(record, fieldId, hasField) {
     return hasField(fieldId) ? record.getCellValueAsString(fieldId) : '';
+}
+
+// multipleLookupValues fields don't hand back the looked-up field's native shape directly -
+// the SDK wraps every entry as {linkedRecordId, value} (see @airtable/blocks's
+// record_core.js's getCellValue()), where `value` holds the actual looked-up value (which
+// may itself be an object, e.g. {id, name} when looking up a link field). Every raw
+// safeGetValue() read of a lookup field needs this unwrap, or callers silently see undefined.
+function lookupValues(record, fieldId, hasField) {
+    const raw = safeGetValue(record, fieldId, hasField) || [];
+    return raw.map(entry => entry?.value);
 }
 
 // The line-items table's columns are configurable (which Media Plan fields show, and in
@@ -247,7 +256,7 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
 
     const fiscalStartMonth = useMemo(() => {
         if (campaignRecordsUnfiltered.length === 0) return 1;
-        const values = safeGetValue(campaignRecordsUnfiltered[0], MEDIA_PLAN_FIELDS.fiscalYearStartDate, hasField) || [];
+        const values = lookupValues(campaignRecordsUnfiltered[0], MEDIA_PLAN_FIELDS.fiscalYearStartDate, hasField);
         return monthNameToNumber(values[0]) ?? 1;
     }, [campaignRecordsUnfiltered, hasField]);
 
@@ -257,9 +266,13 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
     // never silently carries over.
     const [period, setPeriod] = useState(null);
     const [selectedMafRecordId, setSelectedMafRecordId] = useState(null);
+    // Set once SaveToRecordButton's request resolves - collapses the toolbar down to just
+    // "Back to Campaign" (see the render below).
+    const [hasSaved, setHasSaved] = useState(false);
     useEffect(() => {
         setPeriod(null);
         setSelectedMafRecordId(null);
+        setHasSaved(false);
     }, [selectedCampaignId]);
 
     const periodRange = useMemo(
@@ -273,16 +286,30 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
     const mafRecordOptions = useMemo(() => {
         if (campaignRecordsUnfiltered.length === 0) return [];
         const first = campaignRecordsUnfiltered[0];
-        const links = safeGetValue(first, MEDIA_PLAN_FIELDS.mafRecords, hasField) || [];
-        const starts = safeGetValue(first, MEDIA_PLAN_FIELDS.mafPeriodStarts, hasField) || [];
-        const ends = safeGetValue(first, MEDIA_PLAN_FIELDS.mafPeriodEnds, hasField) || [];
+        // Each entry's `value` is itself a link value ({id, name}), since the looked-up
+        // field (Campaign's own "MAF Records") is a Link field - see lookupValues() above.
+        const links = lookupValues(first, MEDIA_PLAN_FIELDS.mafRecords, hasField);
+        const starts = lookupValues(first, MEDIA_PLAN_FIELDS.mafPeriodStarts, hasField);
+        const ends = lookupValues(first, MEDIA_PLAN_FIELDS.mafPeriodEnds, hasField);
         return links.map((link, i) => ({
-            id: link.id,
-            name: link.name,
+            id: link?.id,
+            name: link?.name,
             periodStart: starts[i] || null,
             periodEnd: ends[i] || null,
         }));
     }, [campaignRecordsUnfiltered, hasField]);
+
+    // Scoped to the currently selected period so the "update existing" picker only ever
+    // offers records that actually match what's being generated right now - a Period Label
+    // alone wouldn't be enough to disambiguate once every option in this list necessarily
+    // covers the exact same period.
+    const matchingMafRecords = useMemo(
+        () =>
+            periodRange
+                ? mafRecordOptions.filter(r => r.periodStart === periodRange.start && r.periodEnd === periodRange.end)
+                : [],
+        [mafRecordOptions, periodRange],
+    );
 
     // Selecting an existing MAF pre-fills the period picker from its stored dates (still
     // editable afterward) rather than forcing a fresh pick every time.
@@ -421,33 +448,41 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
                     compact
                 />
                 <div className="flex gap-2 flex-wrap">
-                    <ColumnPicker
-                        availableFields={availableFields}
-                        selectedFieldIds={effectiveColumnFieldIds}
-                        onChange={setColumnFieldIds}
-                        maxColumns={COLUMN_COUNT}
-                    />
-                    <PeriodPicker
-                        flightStart={campaignFlightDates.start}
-                        flightEnd={campaignFlightDates.end}
-                        fiscalStartMonth={fiscalStartMonth}
-                        period={period}
-                        onChange={setPeriod}
-                    />
-                    <MafRecordPicker
-                        records={mafRecordOptions}
-                        selectedId={selectedMafRecordId}
-                        onSelect={selectMafRecord}
-                    />
-                    <SaveToRecordButton
-                        campaignRecordId={selectedCampaign.id}
-                        columnFieldIds={columns.map(field => field.id)}
-                        periodLabel={period ? formatPeriodLabel(period) : null}
-                        periodStart={periodRange?.start ?? null}
-                        periodEnd={periodRange?.end ?? null}
-                        existingMafRecordId={selectedMafRecordId}
-                    />
-                    <PrintButton />
+                    {!hasSaved && (
+                        <>
+                            <ColumnPicker
+                                availableFields={availableFields}
+                                selectedFieldIds={effectiveColumnFieldIds}
+                                onChange={setColumnFieldIds}
+                                maxColumns={COLUMN_COUNT}
+                            />
+                            <PeriodPicker
+                                flightStart={campaignFlightDates.start}
+                                flightEnd={campaignFlightDates.end}
+                                fiscalStartMonth={fiscalStartMonth}
+                                period={period}
+                                onChange={setPeriod}
+                            />
+                            {period && (
+                                <>
+                                    <MafRecordPicker
+                                        records={matchingMafRecords}
+                                        selectedId={selectedMafRecordId}
+                                        onSelect={selectMafRecord}
+                                    />
+                                    <SaveToRecordButton
+                                        campaignRecordId={selectedCampaign.id}
+                                        columnFieldIds={columns.map(field => field.id)}
+                                        periodLabel={formatPeriodLabel(period)}
+                                        periodStart={periodRange?.start ?? null}
+                                        periodEnd={periodRange?.end ?? null}
+                                        existingMafRecordId={selectedMafRecordId}
+                                        onSaved={() => setHasSaved(true)}
+                                    />
+                                </>
+                            )}
+                        </>
+                    )}
                     <BackToCampaignButton />
                 </div>
             </div>

@@ -1,7 +1,9 @@
-// Lets the viewer either generate a brand new MAF or pick an already-generated one (for
-// this campaign) to regenerate in place. `records` is {id, name}[] - name is the MAF's own
-// Period Label, already human-readable. Selecting "Create New" (the empty option) is the
-// default, matching today's behavior before this feature existed.
+// Lets the viewer either generate a brand new MAF or pick an already-generated one to
+// regenerate in place. `records` is {id, name}[], already scoped by the caller to just the
+// ones matching the currently selected period (App.jsx's matchingMafRecords) - every option
+// here would otherwise show the same Period Label text, so a `records` list that isn't
+// pre-filtered would make this genuinely ambiguous, not just cluttered. Selecting "Create
+// New" (the empty option) is the default.
 export default function MafRecordPicker({records, selectedId, onSelect}) {
     return (
         <select

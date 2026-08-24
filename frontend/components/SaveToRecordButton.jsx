@@ -3,9 +3,7 @@ import {GENERATE_ATTACHMENT_WEBHOOK_URL} from '../lib/constants';
 
 // Triggers the "PDF Generator" automation via its webhook trigger - a plain, hand-written
 // PDF (no styling, unsigned) gets uploaded onto a MAF record (created new, or updated in
-// place when existingMafRecordId is set) as an audit-trail copy. This is deliberately not
-// the polished document (see PrintButton) - see lib/constants.js for why that tradeoff was
-// chosen.
+// place when existingMafRecordId is set).
 //
 // hooks.airtable.com sends no CORS headers at all, and confirmed (via curl, bypassing the
 // browser entirely) that it rejects anything other than application/json or
@@ -29,6 +27,7 @@ export default function SaveToRecordButton({
     periodStart,
     periodEnd,
     existingMafRecordId,
+    onSaved,
 }) {
     const [status, setStatus] = useState('idle'); // idle | saving | sent | error
     const hasPeriod = Boolean(periodLabel && periodStart && periodEnd);
@@ -50,6 +49,7 @@ export default function SaveToRecordButton({
                 }),
             });
             setStatus('sent');
+            onSaved?.();
         } catch {
             setStatus('error');
         }
@@ -64,7 +64,7 @@ export default function SaveToRecordButton({
 
     return (
         <button
-            className="no-print px-4 py-2 text-sm font-semibold rounded border border-gray-gray300 text-gray-gray700 hover:bg-gray-gray50 disabled:opacity-50"
+            className="no-print px-4 py-2 text-sm font-semibold rounded bg-blue-blue text-white hover:opacity-90 disabled:opacity-50"
             onClick={handleClick}
             disabled={status === 'saving' || !hasPeriod}
             title={hasPeriod ? undefined : 'Select a time period first'}
