@@ -20,6 +20,26 @@ export const CAMPAIGN_FIELDS = {
     client: 'fldyGTEvcfdtAwLWy', // link to the Client table
 };
 
+// Fields that genuinely exist (and are exposed) on Media Plan but shouldn't be offered as
+// line-item columns - mostly internal linkage/bookkeeping fields (Campaign, Client, the MAF
+// history lookups, fiscal-year plumbing) that read as record IDs or aren't meaningful
+// per-line-item data. ColumnPicker's "available fields" list is filtered against this.
+export const EXCLUDED_COLUMN_FIELD_IDS = new Set([
+    'fldiwXLLHUYchQCK1', // Adjusted Budget
+    'fld9HVTd9acaeh3DV', // All Media Plans in Campaign
+    'fldqq0vw9cnOirH02', // Allow Monthly Budget Carryover
+    'flduT6XLi5MrNzm8W', // Campaign
+    'fldhqB0EKVQmtN9Hw', // Campaign Status
+    'fldbTNRt2uuB1gbzN', // Client
+    'fldjIohJNwZAu3iNB', // Fiscal Year Start Date
+    'fldR1m2sgP18jrimm', // Flight End Fiscal Year
+    'fldfE22noJ80ECdcl', // Flight Start Fiscal Year
+    'fldRylmZzCDSG6KSI', // Next Fiscal Year
+    'fldGLI7SXmhZuzO14', // Campaign MAF Period Ends
+    'fldRplSDrDmJftBhY', // Campaign MAF Period Starts
+    'fldt6hkLKMMqtdAwt', // Campaign MAF Records
+]);
+
 export const MEDIA_PLAN_FIELDS = {
     site: 'fldgWoTC09fphswbx', // primary field
     country: 'fldDntdz6zs6SYV24',

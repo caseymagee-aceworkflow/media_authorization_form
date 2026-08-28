@@ -7,6 +7,7 @@ import {
     MONTHLY_PLAN_TABLE_ID,
     FALLBACK_FISCAL_LABEL,
     LEGAL_TEMPLATE,
+    EXCLUDED_COLUMN_FIELD_IDS,
 } from './lib/constants';
 import {computeFlightDates} from './lib/flightDates';
 import {formatCurrency} from './lib/formatters';
@@ -193,7 +194,10 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
     }, [columnFieldIds, defaultColumnFieldIds]);
     const effectiveColumnFieldIds = columnFieldIds ?? defaultColumnFieldIds;
 
-    const availableFields = mediaPlanTable.fields;
+    const availableFields = useMemo(
+        () => mediaPlanTable.fields.filter(field => !EXCLUDED_COLUMN_FIELD_IDS.has(field.id)),
+        [mediaPlanTable],
+    );
     const columns = useMemo(() => {
         return effectiveColumnFieldIds.map(id => mediaPlanTable.getFieldByIdIfExists(id)).filter(Boolean);
     }, [effectiveColumnFieldIds, mediaPlanTable]);
