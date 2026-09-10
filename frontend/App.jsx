@@ -487,7 +487,7 @@ function CampaignDocumentApp({mediaPlanTable, monthlyPlanTable}) {
                             )}
                         </>
                     )}
-                    <BackToCampaignButton />
+                    <BackToCampaignButton campaignId={selectedCampaign.id} />
                 </div>
             </div>
             <div className="maf-document">

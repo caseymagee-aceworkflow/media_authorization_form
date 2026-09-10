@@ -469,17 +469,20 @@ y -= 16;
 page1.boldText(72, y, 11, `${title} ${periodLabel}`);
 y -= 30;
 
-// Bordered summary box, mirroring DataPage.jsx's layout: date/flight info on the left,
-// two stat blocks (bold value + label beneath) on the right.
+// Bordered summary box, mirroring DataPage.jsx's layout: date/flight/period info on the
+// left (three separate lines - Period used to be appended onto the Flight Dates line, which
+// ran wide enough to overlap the stat blocks on the right), two stat blocks (bold value +
+// label beneath) on the right.
 const SUMMARY_BOX_TOP = y;
-const SUMMARY_BOX_BOTTOM = y - 46;
+const SUMMARY_BOX_BOTTOM = y - 58;
 page1.line(72, SUMMARY_BOX_TOP, 540, SUMMARY_BOX_TOP, 1);
 page1.line(72, SUMMARY_BOX_BOTTOM, 540, SUMMARY_BOX_BOTTOM, 1);
 page1.line(72, SUMMARY_BOX_TOP, 72, SUMMARY_BOX_BOTTOM, 1);
 page1.line(540, SUMMARY_BOX_TOP, 540, SUMMARY_BOX_BOTTOM, 1);
 
 page1.text(84, SUMMARY_BOX_TOP - 16, 9, `Today's Date: ${todaysDate}`);
-page1.text(84, SUMMARY_BOX_TOP - 30, 9, `Flight Dates: ${flightRange} (Period: ${periodStart} - ${periodEnd})`);
+page1.text(84, SUMMARY_BOX_TOP - 29, 9, `Flight Dates: ${flightRange}`);
+page1.text(84, SUMMARY_BOX_TOP - 42, 9, `Period: ${periodStart} - ${periodEnd}`);
 
 const statBoxes = [
     {label: 'Current Adjusted Budget', value: money(currentAdjustedBudget)},
@@ -489,8 +492,8 @@ const STAT_BOX_WIDTH = 110;
 const statsStartX = 540 - statBoxes.length * STAT_BOX_WIDTH;
 statBoxes.forEach((stat, i) => {
     const boxCenterX = statsStartX + i * STAT_BOX_WIDTH + STAT_BOX_WIDTH / 2;
-    page1.boldText(boxCenterX - estimateTextWidth(stat.value, 11, true) / 2, SUMMARY_BOX_TOP - 20, 11, stat.value);
-    page1.text(boxCenterX - estimateTextWidth(stat.label, 7, false) / 2, SUMMARY_BOX_TOP - 32, 7, stat.label);
+    page1.boldText(boxCenterX - estimateTextWidth(stat.value, 11, true) / 2, SUMMARY_BOX_TOP - 25, 11, stat.value);
+    page1.text(boxCenterX - estimateTextWidth(stat.label, 7, false) / 2, SUMMARY_BOX_TOP - 37, 7, stat.label);
 });
 
 y = SUMMARY_BOX_BOTTOM - 20;
