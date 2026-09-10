@@ -105,8 +105,10 @@ export const FALLBACK_FISCAL_LABEL = 'FY27';
 
 // Fires the "Generate MAF Attachment" automation (webhook trigger, since button-field
 // triggers can't be invoked from an Interface button - only from a native Interface
-// button element, which doesn't apply to a custom extension's own button). The webhook
-// can only trigger this one automation - not general API access - so it's fine to keep
-// as a plain constant here even though the extension's code ships to every viewer.
-export const GENERATE_ATTACHMENT_WEBHOOK_URL =
-    'https://hooks.airtable.com/workflows/v1/genericWebhook/appJ0nLzqh0oodsRQ/wfl6lCrUcjhkZ7CLg/wtr4rzMg45YNJi4RQ';
+// button element, which doesn't apply to a custom extension's own button). It still ships
+// to every viewer inside the built bundle (unavoidable for a client-side extension) - the
+// re-export from webhookConfig.local is only to keep the real URL out of the GIT REPO,
+// since it has no auth of its own beyond the automation/trigger IDs being unguessable, and
+// this repo may end up somewhere with broader read access than "everyone who runs the
+// deployed Interface." See webhookConfig.example.js for setup if that file is missing.
+export {GENERATE_ATTACHMENT_WEBHOOK_URL} from './webhookConfig.local';

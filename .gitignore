@@ -2,3 +2,6 @@
 /.airtableblocksrc.json
 /build
 /.tmp
+
+# Real webhook URL - see frontend/lib/webhookConfig.example.js for setup.
+frontend/lib/webhookConfig.local.js
