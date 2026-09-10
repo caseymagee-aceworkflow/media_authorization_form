@@ -14,6 +14,12 @@ export default function BackToCampaignButton({campaignId}) {
     return (
         <a
             href={href}
+            // This custom element renders inside its own iframe within the Airtable app - a
+            // plain click only navigates that iframe (which can't render Airtable's own app
+            // chrome), not the top-level window, so the link visibly "did nothing" without
+            // this. target="_top" breaks out to the top-level browsing context instead;
+            // same-origin (airtable.com -> airtable.com) so it isn't blocked as frame-busting.
+            target="_top"
             className="no-print px-4 py-2 text-sm font-semibold rounded border border-gray-gray300 text-gray-gray700 hover:bg-gray-gray50 dark:text-gray-gray200 dark:border-gray-gray600 dark:hover:bg-gray-gray800 inline-block"
         >
             ← Back to Campaign
