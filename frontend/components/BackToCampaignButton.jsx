@@ -10,21 +10,20 @@
 // pag9Z3G4YnxaSiii2 in the "Director Dashboard" interface) so Airtable's own back
 // navigation from the detail view returns here, not wherever browser history happened to be.
 //
-// A plain <a target="_top"> click still got intercepted: Airtable's own app is a
-// client-side-routed SPA, and its top-level document has a click listener that treats an
-// anchor click to a same-origin URL as an in-app route change rather than a real navigation
-// - combined with the dropdown's own URL-sync effect having already pushed a history entry
-// per campaign switch (see App.jsx), that made this button appear to just step backward
-// through recent dropdown selections instead of leaving for the detail page. Setting
-// `window.top.location` directly from a click handler bypasses anchor-click interception
-// entirely (no <a> element involved), forcing a genuine top-level navigation.
+// This custom element actually runs on a completely different origin than the parent
+// Airtable app (an *.alt.airtableblocks.com sandbox, confirmed via a thrown
+// SecurityError), not just a different same-origin frame - `<a target="_top">` and
+// `window.top.location.assign(...)` both failed because reading/calling methods on a
+// cross-origin frame's Location is blocked. A plain property ASSIGNMENT to `.href` is
+// specifically carved out as allowed cross-origin (the standard way to navigate a parent
+// frame from a sandboxed cross-origin iframe), so that's the one form that actually works.
 export default function BackToCampaignButton({campaignId}) {
     const href = `https://airtable.com/appJ0nLzqh0oodsRQ/pagm5r5idgH32XZZy/${campaignId}?home=pag9Z3G4YnxaSiii2`;
     return (
         <button
             type="button"
             onClick={() => {
-                window.top.location.assign(href);
+                window.top.location.href = href;
             }}
             className="no-print px-4 py-2 text-sm font-semibold rounded border border-gray-gray300 text-gray-gray700 hover:bg-gray-gray50 dark:text-gray-gray200 dark:border-gray-gray600 dark:hover:bg-gray-gray800"
         >
